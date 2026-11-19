@@ -208,7 +208,7 @@
                 <h2 style="text-align: center; margin-bottom: 1rem;">Course Registration</h2>
                 <div class="telebirr-box">
                     <strong>Telebirr Payment Recipient:</strong> <span id="telebirr-target-display">0917106325</span><br>
-                    <span>After paying, an SMS alert is sent to Admin (<strong>0917106325</strong>). Access unlocks once Admin approves and issues your <strong>Admin-Approved Link</strong>.</span>
+                    <span>After paying, an SMS alert is sent to Admin (<strong>0917106325</strong>). Access unlocks once Admin approves and sends your <strong>Admin-Approved Link</strong>.</span>
                 </div>
                 <div class="form-group">
                     <label>Full Name</label>
@@ -603,7 +603,7 @@
         <div id="view-certificate-prompt" class="hidden">
             <div class="card" style="text-align: center;">
                 <h2>Official Course Certificate</h2>
-                <p style="margin: 1rem 0;">Send the certificate fee to Telebirr <strong>0917106325</strong>. Admin will receive an SMS alert and issue your <strong>Admin-Approved Certificate Link</strong> upon approval.</p>
+                <p style="margin: 1rem 0;">Send the certificate fee to Telebirr <strong>0917106325</strong>. Admin will receive an SMS alert and send your <strong>Admin-Approved Certificate Link</strong> upon approval.</p>
                 <div class="form-group" style="text-align: left; max-width: 400px; margin: 0 auto 1rem;">
                     <label>Certificate Payment Txn Reference (Optional)</label>
                     <input type="text" id="cert-txref" placeholder="e.g., CERT-TX987654">
@@ -687,7 +687,8 @@
                 </div>
             </div>
 
-            <h3>Student Payments, Approval Controls & Admin-Approved Links</h3>
+            <h3>Student Payments, Approval Controls & Cross-Device Admin-Approved Links</h3>
+            <p style="font-size: 0.9rem; color: #555; margin-top: 0.3rem;">Copy and send the generated link below to the student via SMS/WhatsApp/Email—it works on any device or browser when deployed.</p>
             <table class="admin-table">
                 <thead>
                     <tr>
@@ -695,7 +696,7 @@
                         <th>Payment & Txn</th>
                         <th>Registration Access</th>
                         <th>Certificate Access</th>
-                        <th>Admin-Approved Link</th>
+                        <th>Admin-Approved Link (Shareable)</th>
                     </tr>
                 </thead>
                 <tbody id="admin-student-list"></tbody>
@@ -712,9 +713,142 @@
 
     <script>
         const ADMIN_CODE = "5402402";
+        const SIGN_SALT = "TOC_ACADEMY_5402402_VERIFIED";
         let activeReaderKey = null;
         let currentPptModuleId = 1;
         let currentPptSlideIndex = 0;
+
+        /* Safe Storage Wrapper (works even in strict iframe sandboxes or private mode) */
+        const memoryStore = {};
+        function safeGetItem(key) {
+            try {
+                return window.localStorage.getItem(key);
+            } catch (e) {
+                return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null;
+            }
+        }
+        function safeSetItem(key, val) {
+            memoryStore[key] = val;
+            try {
+                window.localStorage.setItem(key, val);
+            } catch (e) { /* fallback to memoryStore */ }
+        }
+        function safeRemoveItem(key) {
+            delete memoryStore[key];
+            try {
+                window.localStorage.removeItem(key);
+            } catch (e) { /* ignore */ }
+        }
+
+        /* Unicode-safe Base64 & Signature Helpers for Cross-Device Approved Links */
+        function computeSignature(str) {
+            let h1 = 0xdeadbeef ^ str.length;
+            let h2 = 0x41c6ce57 ^ str.length;
+            for (let i = 0; i < str.length; i++) {
+                const ch = str.charCodeAt(i);
+                h1 = Math.imul(h1 ^ ch, 2654435761);
+                h2 = Math.imul(h2 ^ ch, 1597334677);
+            }
+            h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+            h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+            return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+        }
+
+        function encodePayload(obj) {
+            const json = JSON.stringify(obj);
+            const utf8 = encodeURIComponent(json).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode('0x' + p1));
+            return btoa(utf8).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        function decodePayload(b64) {
+            try {
+                let norm = b64.replace(/-/g, '+').replace(/_/g, '/');
+                while (norm.length % 4) norm += '=';
+                const bin = atob(norm);
+                const pct = Array.prototype.map.call(bin, c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join('');
+                return JSON.parse(decodeURIComponent(pct));
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function buildApprovedLink(user, scope) {
+            const base = window.location.href.split('#')[0].split('?')[0];
+            const rawCore = `${user.id}|${user.name}|${user.phone}|${scope}|${SIGN_SALT}`;
+            const payload = {
+                id: user.id,
+                n: user.name,
+                e: user.email || "",
+                p: user.phone || "",
+                s: scope,
+                d: user.certApprovedDate || new Date().toLocaleDateString(),
+                l: config.certLogo || "ToC LOGO",
+                sig: computeSignature(rawCore)
+            };
+            return `${base}#access=${encodePayload(payload)}`;
+        }
+
+        function parseAccessFromUrl() {
+            const searchParams = new URLSearchParams(window.location.search);
+            let encoded = searchParams.get('access');
+            if (!encoded && window.location.hash && window.location.hash.length > 1) {
+                const hashParams = new URLSearchParams(window.location.hash.substring(1));
+                encoded = hashParams.get('access');
+            }
+            if (!encoded) return null;
+
+            const data = decodePayload(encoded);
+            if (!data || !data.id || !data.n || !data.s || !data.sig) return null;
+
+            const expectedSig = computeSignature(`${data.id}|${data.n}|${data.p || ""}|${data.s}|${SIGN_SALT}`);
+            if (data.sig !== expectedSig) return null;
+            return data;
+        }
+
+        function activateSignedAccess(data) {
+            users = JSON.parse(safeGetItem('toc_users')) || users;
+            let user = users.find(u => u.id === data.id);
+            if (!user) {
+                user = {
+                    id: data.id,
+                    name: data.n,
+                    email: data.e || "",
+                    phone: data.p || "",
+                    regMethod: "Telebirr",
+                    regCurrency: "ETB",
+                    regAmount: `${config.regETB} Birr`,
+                    regTxRef: "Verified Link",
+                    regApproved: true,
+                    hasCertificate: data.s === 'cert',
+                    certPendingApproval: data.s === 'cert',
+                    certApproved: data.s === 'cert',
+                    certApprovedDate: data.d,
+                    completedQuizzes: {},
+                    assignments: {}
+                };
+                users.push(user);
+            } else {
+                user.regApproved = true;
+                if (data.s === 'cert') {
+                    user.certApproved = true;
+                    user.certPendingApproval = true;
+                    user.hasCertificate = true;
+                    user.certApprovedDate = data.d || user.certApprovedDate;
+                }
+            }
+            if (data.l && !config.certLogo) {
+                config.certLogo = data.l;
+            }
+            currentUser = user;
+            saveData();
+
+            if (data.s === 'cert') {
+                openCertificateView(user);
+            } else {
+                openCourseView(user);
+            }
+            return true;
+        }
 
         const TOOLKIT_GUIDES = {
             "handbook-overview": {
@@ -1054,3 +1188,964 @@
                     "Document assumptions across Causal, Contextual, and Delivery layers.",
                     "Rate evidence honestly (Strong, Moderate, Emerging) and plan learning where evidence is thin."
                 ],
+                notes: "Evidence tiers: Strong (High — RCTs, systematic reviews, quasi-experimental), Moderate (Medium — evaluations, mixed-methods, surveys), Emerging (Low — pilots, case studies, practitioner/community voices).",
+                prompt: "Critique each If-Then-Because link below and flag any missing 'because' mechanism or unstated causal, contextual, or delivery assumption.",
+                quiz: {
+                    question: "In an If–Then–Because chain, what is the specific role of the 'BECAUSE' clause?",
+                    options: [
+                        "It lists the total budget required for the activity",
+                        "It explains the causal mechanism why one result leads to the next",
+                        "It names the donor funding the grant"
+                    ],
+                    correct: 1,
+                    explanation: "The 'because' forces you to explain the underlying mechanism—the exact point reviewers examine for logical credibility."
+                },
+                assignmentPrompt: "Write two complete If–Then–Because causal sentences and one Causal Assumption:"
+            },
+            {
+                id: 5,
+                title: "Module 5: Results Framework, Stakeholders & Cross-Cutting Lenses",
+                desc: "Operationalize SMART indicators, baselines, targets, and disaggregation; map stakeholders; and integrate cross-cutting lenses.",
+                lessons: [
+                    { label: "Lesson 5.1: SMART Indicators, 5 Operational Questions, Formulas & Disaggregation", guideKey: "rf-stakeholders-lenses" },
+                    { label: "Lesson 5.2: Stakeholder Mapping, Enabling Factors & 6 Cross-Cutting Lenses", guideKey: "rf-stakeholders-lenses" }
+                ],
+                studyLinks: [
+                    { label: "PPT Slides: Module 5 Deck", action: "openPptModule(5)" },
+                    { label: "Handout: Module 5 Study Sheet", action: "switchDashTab('handouts')" },
+                    { label: "Flashcards: Module 5 Cards", action: "openModuleFlashcards(5)" },
+                    { label: "Mind Map: Module 5 Map", action: "switchDashTab('mindmaps')" }
+                ],
+                resources: [
+                    { label: "Handbook: Results Framework, Indicator Guide & Cross-Cutting Lenses", guideKey: "rf-stakeholders-lenses" }
+                ],
+                promptLinks: [
+                    { label: "AI Prompt Library: SMART Indicators & Cross-Cutting Lenses Prompts", guideKey: "prompts-m5" }
+                ],
+                handoutPoints: [
+                    "Pair every result with SMART indicators, clear baselines, targets, verification methods, and reporting frequency.",
+                    "Disaggregate indicators by sex, age, disability, and location.",
+                    "Embed Gender, Disability/Inclusion, Safeguarding/PSEA, Conflict Sensitivity, Climate, and Local Ownership."
+                ],
+                notes: "Cross-cutting lenses: Gender equality, Disability & inclusion, Safeguarding & PSEA, Conflict sensitivity & do no harm, Climate & environment, Local ownership & sustainability, plus Accountability to affected people.",
+                prompt: "Suggest practical SMART indicators (count, percentage, rate, index, or milestone) and disaggregation categories (sex, age, disability, location) for these outcomes.",
+                quiz: {
+                    question: "Which five questions operationalize an outcome indicator so it is ready for donor submission?",
+                    options: [
+                        "Who/what changes, baseline, target threshold, by when, and how verified",
+                        "Logo size, font style, page limit, cover color, and annex count",
+                        "Staff salaries, office rent, vehicle mileage, per diem, and audit firm"
+                    ],
+                    correct: 0,
+                    explanation: "Every outcome indicator must define who/what changes, the starting baseline, target threshold, timeframe, and verification method/source."
+                },
+                assignmentPrompt: "Define 1 Outcome Indicator with Baseline, Target, Means of Verification, and Disaggregation:"
+            },
+            {
+                id: 6,
+                title: "Module 6: MEAL Plan, ToC Narrative & Donor-Readiness Check",
+                desc: "Structure your MEAL plan, write a 400–600 word ToC narrative across 6 prompts, and score at least 85% on the Donor-Readiness Checklist.",
+                lessons: [
+                    { label: "Lesson 6.1: MEAL Evaluation Criteria, Data Collection & Data Quality/Ethics", guideKey: "meal-narrative-checklist" },
+                    { label: "Lesson 6.2: 6-Paragraph Narrative ToC (400–600 Words), Readiness Scorecard & Worked Example", guideKey: "meal-narrative-checklist" }
+                ],
+                studyLinks: [
+                    { label: "PPT Slides: Module 6 Deck", action: "openPptModule(6)" },
+                    { label: "Handout: Module 6 Study Sheet", action: "switchDashTab('handouts')" },
+                    { label: "Flashcards: Module 6 Cards", action: "openModuleFlashcards(6)" },
+                    { label: "Mind Map: Module 6 Map", action: "switchDashTab('mindmaps')" }
+                ],
+                resources: [
+                    { label: "Handbook: MEAL Plan, 6-Prompt Narrative, Readiness Checklist & Worked Example", guideKey: "meal-narrative-checklist" }
+                ],
+                promptLinks: [
+                    { label: "AI Prompt Library: 6-Prompt Narrative & Donor-Readiness Prompts", guideKey: "prompts-m6" }
+                ],
+                handoutPoints: [
+                    "Connect MEAL routines to learning questions, data quality verification, and ethical safeguards.",
+                    "Write a coherent 400–600 word narrative across the 6 structured ToC prompts.",
+                    "Score 85%+ (29/34+) on the Donor-Readiness Scorecard before submitting your proposal."
+                ],
+                notes: "Aim for 85%+ (29+ of 34 points) on the Donor-Readiness Checklist before submitting your proposal or concept note.",
+                prompt: "Draft a 450-word Theory of Change narrative answering the 6 toolkit prompts using strictly my provided notes, with zero invented citations or statistics.",
+                quiz: {
+                    question: "What minimum score on the 34-point Donor-Readiness Checklist indicates a strong, submission-ready Theory of Change?",
+                    options: [
+                        "50% or above (17+ points)",
+                        "70% to 84% (24–28 points)",
+                        "85% or above (29+ points)"
+                    ],
+                    correct: 2,
+                    explanation: "85%+ indicates a strong ToC; 70–84% needs polish; below 70% requires revising the underlying logic first."
+                },
+                assignmentPrompt: "Draft your 6-paragraph Theory of Change Narrative (or executive summary paragraph):"
+            }
+        ];
+
+        const CHECKLIST_ITEMS = [
+            { area: "Logic", text: "The impact is a lasting change for a defined group, not an activity." },
+            { area: "Logic", text: "Each outcome is a change in people, practice or conditions (not an activity or output)." },
+            { area: "Logic", text: "Outcomes are necessary and, together, sufficient to reach the impact." },
+            { area: "Logic", text: "Every causal link has a 'because' that a skeptical reviewer would accept." },
+            { area: "Logic", text: "Every output and activity leads to at least one outcome (nothing orphaned)." },
+            { area: "Evidence", text: "The problem is described with recent data and named sources." },
+            { area: "Evidence", text: "Key causal links are supported by evidence, and weak areas are acknowledged." },
+            { area: "Measurement", text: "Every result has at least one SMART indicator with baseline and target." },
+            { area: "Measurement", text: "Indicators are defined (numerator, denominator, source, frequency, responsible)." },
+            { area: "Measurement", text: "Indicators are disaggregated by sex, age and disability where relevant." },
+            { area: "Assumptions", text: "Assumptions and risks are specific, scored and linked to mitigation actions." },
+            { area: "Inclusion", text: "Gender, disability, safeguarding and conflict sensitivity are addressed in the design." },
+            { area: "Feasibility", text: "Scale, timeframe and budget are realistic for the outcomes promised." },
+            { area: "Feasibility", text: "Roles of partners and stakeholders are clear." },
+            { area: "Learning", text: "A MEAL plan explains how results will be tracked and used to adapt." },
+            { area: "Presentation", text: "The diagram and narrative tell the same story and use the donor's terminology." },
+            { area: "Presentation", text: "A non-specialist can understand the theory in two minutes." }
+        ];
+
+        let config = JSON.parse(safeGetItem('toc_config')) || {
+            regETB: 10,
+            regUSD: 0.20,
+            certETB: 100,
+            certUSD: 2.00,
+            adminPhone: "0917106325",
+            certLogo: "ToC LOGO"
+        };
+        let users = JSON.parse(safeGetItem('toc_users')) || [];
+        let currentUser = JSON.parse(safeGetItem('toc_currentUser')) || null;
+        let smsAlerts = JSON.parse(safeGetItem('toc_sms_alerts')) || [];
+        let isAdmin = false;
+        let activeFlashcardsList = [...FLASHCARDS_DATA];
+
+        function triggerFileDownload(filename, content) {
+            const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+
+        function downloadCurrentReaderGuide() {
+            if (!activeReaderKey || !TOOLKIT_GUIDES[activeReaderKey]) return;
+            const g = TOOLKIT_GUIDES[activeReaderKey];
+            triggerFileDownload(`${activeReaderKey}.txt`, `${g.title}\n${"=".repeat(g.title.length)}\n\n${g.plainText}\n`);
+        }
+
+        function downloadAllHandbooks() {
+            const keys = ["handbook-overview", "terminology-snapshot", "problem-analysis", "impact-outcomes", "pathway-evidence", "rf-stakeholders-lenses", "meal-narrative-checklist"];
+            const out = keys.map(k => `## ${TOOLKIT_GUIDES[k].title}\n\n${TOOLKIT_GUIDES[k].plainText}`).join("\n\n" + "-".repeat(60) + "\n\n");
+            triggerFileDownload("ToC_Complete_Handbooks.txt", out);
+        }
+
+        function downloadAllHandouts() {
+            const out = MODULES_DATA.map(m =>
+                `${m.title} — HANDOUT\n${"=".repeat(m.title.length + 10)}\n${m.handoutPoints.map((pt, i) => `${i + 1}. ${pt}`).join("\n")}\n\nSummary Notes: ${m.notes}`
+            ).join("\n\n" + "-".repeat(60) + "\n\n");
+            triggerFileDownload("ToC_Module_Handouts.txt", out);
+        }
+
+        function downloadAllPptSlides() {
+            const out = Object.entries(PPT_DECKS).map(([modId, slides]) => {
+                const header = `MODULE ${modId} PPT SLIDE DECK\n${"=".repeat(26)}`;
+                const body = slides.map(s => `[${s.tag}] ${s.title}\n${s.bullets.map(b => `  * ${b}`).join("\n")}`).join("\n\n");
+                return `${header}\n\n${body}`;
+            }).join("\n\n" + "=".repeat(60) + "\n\n");
+            triggerFileDownload("ToC_PPT_Slide_Deck.txt", out);
+        }
+
+        function downloadFlashcards() {
+            const out = FLASHCARDS_DATA.map((c, idx) =>
+                `Card ${idx + 1} (Module ${c.mod})\nFRONT: ${c.front}\nBACK:  ${c.back}`
+            ).join("\n\n" + "-".repeat(50) + "\n\n");
+            triggerFileDownload("ToC_Study_Flashcards.txt", out);
+        }
+
+        function downloadAllMindMaps() {
+            const out = MINDMAPS_DATA.map(mm => {
+                const branchesText = mm.branches.map(b => `  [${b.title}]\n    - ${b.items.join("\n    - ")}`).join("\n");
+                return `CENTRAL NODE: ${mm.center}\n${branchesText}`;
+            }).join("\n\n" + "-".repeat(60) + "\n\n");
+            triggerFileDownload("ToC_Visual_Mind_Maps.txt", out);
+        }
+
+        function downloadCourseText() {
+            const out = MODULES_DATA.map(m =>
+                `${m.title}\n${"=".repeat(m.title.length)}\nOverview: ${m.desc}\n\nText Notes: ${m.notes}\n\nFeatured AI Prompt: ${m.prompt}\n\nQuiz: ${m.quiz.question}\nAnswer: ${m.quiz.options[m.quiz.correct]} (${m.quiz.explanation})\n\nAssignment Prompt: ${m.assignmentPrompt}`
+            ).join("\n\n" + "=".repeat(60) + "\n\n");
+            triggerFileDownload("Results_Based_ToC_Course_Text.txt", out);
+        }
+
+        function downloadWorksheetsExport() {
+            const fields = [
+                ["Worksheet 1 - Effects", "ws-tree-effects"],
+                ["Worksheet 1 - Core Problem", "ws-tree-core"],
+                ["Worksheet 1 - Direct Causes", "ws-tree-direct"],
+                ["Worksheet 1 - Root Causes", "ws-tree-root"],
+                ["Worksheet 2 (Row 1) - IF", "ws-if-1"],
+                ["Worksheet 2 (Row 1) - THEN", "ws-then-1"],
+                ["Worksheet 2 (Row 1) - BECAUSE", "ws-bec-1"],
+                ["Worksheet 3 - Impact Indicator", "ws-rf-imp-ind"],
+                ["Worksheet 3 - Outcome 1 Indicator", "ws-rf-oc1-ind"],
+                ["Worksheet 3 - Outcome 2 Indicator", "ws-rf-oc2-ind"],
+                ["Worksheet 3 - Output 1.1 Indicator", "ws-rf-out1-ind"]
+            ];
+            const lines = fields.map(([label, id]) => {
+                const el = document.getElementById(id);
+                return `${label}:\n${el ? el.value : ""}`;
+            });
+            const scoreBadge = document.getElementById("checklist-score-badge");
+            lines.push(`Donor-Readiness Scorecard:\n${scoreBadge ? scoreBadge.innerText : ""}`);
+            triggerFileDownload("ToC_Worksheets_And_Scorecard.txt", lines.join("\n\n") + "\n");
+        }
+
+        /* PPT Slide Controls */
+        function openPptModule(modId) {
+            currentPptModuleId = Number(modId) || 1;
+            currentPptSlideIndex = 0;
+            const sel = document.getElementById('ppt-module-select');
+            if (sel) sel.value = String(currentPptModuleId);
+            switchDashTab('ppt');
+            renderPptSlide();
+        }
+
+        function selectPptModule(modId) {
+            currentPptModuleId = Number(modId) || 1;
+            currentPptSlideIndex = 0;
+            renderPptSlide();
+        }
+
+        function nextPptSlide() {
+            const slides = PPT_DECKS[currentPptModuleId] || [];
+            if (!slides.length) return;
+            currentPptSlideIndex = (currentPptSlideIndex + 1) % slides.length;
+            renderPptSlide();
+        }
+
+        function prevPptSlide() {
+            const slides = PPT_DECKS[currentPptModuleId] || [];
+            if (!slides.length) return;
+            currentPptSlideIndex = (currentPptSlideIndex - 1 + slides.length) % slides.length;
+            renderPptSlide();
+        }
+
+        function renderPptSlide() {
+            const slides = PPT_DECKS[currentPptModuleId] || [];
+            if (!slides.length) return;
+            const slide = slides[currentPptSlideIndex];
+            const stage = document.getElementById('ppt-slide-stage');
+            const counter = document.getElementById('ppt-slide-counter');
+            if (stage) {
+                stage.innerHTML = `
+                    <div>
+                        <span class="ppt-slide-tag">${slide.tag}</span>
+                        <div class="ppt-slide-title">${slide.title}</div>
+                        <ul class="ppt-slide-bullets">${slide.bullets.map(b => `<li>${b}</li>`).join('')}</ul>
+                    </div>
+                    <div style="font-size:0.82rem; opacity:0.8; margin-top:1rem;">Results-Based Theory of Change & AI for Proposals — Presentation Mode</div>
+                `;
+            }
+            if (counter) {
+                counter.innerText = `Module ${currentPptModuleId} • Slide ${currentPptSlideIndex + 1} of ${slides.length}`;
+            }
+        }
+
+        /* Handouts Renderer */
+        function renderHandoutsTab() {
+            const container = document.getElementById('handouts-list-container');
+            if (!container) return;
+            container.innerHTML = MODULES_DATA.map(m => `
+                <div class="handout-box">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+                        <h4>${m.title} — Learner Handout</h4>
+                        <a href="javascript:void(0)" onclick="openToolkitGuide('${m.lessons[0].guideKey}'); return false;">Open Detailed Guide →</a>
+                    </div>
+                    <ul>${m.handoutPoints.map(pt => `<li>${pt}</li>`).join('')}</ul>
+                </div>
+            `).join('');
+        }
+
+        /* Flashcards Controls */
+        function openModuleFlashcards(modId) {
+            const sel = document.getElementById('flashcard-filter');
+            if (sel) sel.value = String(modId);
+            switchDashTab('flashcards');
+            renderFlashcards();
+        }
+
+        function shuffleFlashcards() {
+            for (let i = activeFlashcardsList.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [activeFlashcardsList[i], activeFlashcardsList[j]] = [activeFlashcardsList[j], activeFlashcardsList[i]];
+            }
+            renderFlashcards();
+        }
+
+        function renderFlashcards() {
+            const container = document.getElementById('flashcards-container');
+            if (!container) return;
+            const filterVal = document.getElementById('flashcard-filter') ? document.getElementById('flashcard-filter').value : 'all';
+            const filtered = filterVal === 'all'
+                ? activeFlashcardsList
+                : activeFlashcardsList.filter(c => String(c.mod) === filterVal);
+
+            container.innerHTML = filtered.map((card, idx) => `
+                <div class="flashcard" id="fc-${idx}" onclick="this.classList.toggle('flipped'); const s = this.querySelector('.fc-state'); s.innerText = this.classList.contains('flipped') ? 'Answer / Back (Click to flip)' : 'Prompt / Front (Click to flip)'; const t = this.querySelector('.flashcard-text'); t.innerText = this.classList.contains('flipped') ? ${JSON.stringify(card.back)} : ${JSON.stringify(card.front)};">
+                    <div>
+                        <div class="flashcard-side">Module ${card.mod} • <span class="fc-state">Prompt / Front (Click to flip)</span></div>
+                        <div class="flashcard-text">${card.front}</div>
+                    </div>
+                    <div class="flashcard-footer">
+                        <span>Tap card to flip</span>
+                        <span>Card ${idx + 1}/${filtered.length}</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        /* Mind Maps Renderer */
+        function renderMindMapsTab() {
+            const container = document.getElementById('mindmaps-container');
+            if (!container) return;
+            container.innerHTML = MINDMAPS_DATA.map(mm => `
+                <div class="mindmap-box">
+                    <div class="mindmap-center">🧠 ${mm.center}</div>
+                    <div class="mindmap-branches">
+                        ${mm.branches.map(b => `
+                            <div class="mindmap-branch">
+                                <div class="mindmap-branch-title">▸ ${b.title}</div>
+                                <ul>${b.items.map(item => `<li>${item}</li>`).join('')}</ul>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderFullCourseTextTab() {
+            const container = document.getElementById("full-course-text-container");
+            if (!container) return;
+            container.innerHTML = MODULES_DATA.map(m => `
+                <div class="text-reading-block">
+                    <strong>${m.title}</strong>
+                    <p style="margin-top:0.35rem;">${m.desc}</p>
+                    <p style="margin-top:0.4rem;"><strong>Text Notes:</strong> ${m.notes}</p>
+                    <p style="margin-top:0.4rem;"><strong>AI Prompt:</strong> <em>"${m.prompt}"</em></p>
+                </div>
+            `).join("");
+        }
+
+        function init() {
+            updateUIWithSettings();
+            renderModules();
+            renderPptSlide();
+            renderHandoutsTab();
+            renderFlashcards();
+            renderMindMapsTab();
+            renderFullCourseTextTab();
+            renderChecklist();
+            loadWorksheets();
+
+            const signedAccess = parseAccessFromUrl();
+            if (signedAccess && activateSignedAccess(signedAccess)) {
+                return;
+            }
+
+            if (currentUser) {
+                routeCurrentUser();
+            } else {
+                showView('landing');
+            }
+        }
+
+        window.addEventListener('hashchange', () => {
+            const signedAccess = parseAccessFromUrl();
+            if (signedAccess) {
+                activateSignedAccess(signedAccess);
+            }
+        });
+
+        function routeCurrentUser() {
+            users = JSON.parse(safeGetItem('toc_users')) || users;
+            const fresh = users.find(u => u.id === currentUser.id) || currentUser;
+            currentUser = fresh;
+            saveData();
+
+            if (currentUser.certPendingApproval && !currentUser.certApproved) {
+                showPendingScreen(currentUser, 'Certificate');
+            } else if (!currentUser.regApproved) {
+                showPendingScreen(currentUser, 'Registration');
+            } else {
+                openCourseView(currentUser);
+            }
+        }
+
+        function openCourseView(user) {
+            document.getElementById('student-name-display').innerText = user.name;
+            renderModules();
+            renderPptSlide();
+            renderHandoutsTab();
+            renderFlashcards();
+            renderMindMapsTab();
+            renderFullCourseTextTab();
+            updateProgressUI();
+            showView('course');
+        }
+
+        function openCertificateView(user) {
+            renderCertificateLogo();
+            document.getElementById('cert-name').innerText = user.name;
+            document.getElementById('cert-date').innerText = user.certApprovedDate || new Date().toLocaleDateString();
+            showView('certificate');
+        }
+
+        function showPendingScreen(user, stage) {
+            const adminPhone = config.adminPhone || "0917106325";
+            document.getElementById('pending-message').innerHTML =
+                `Thank you, <strong>${user.name}</strong>. Your <strong>${stage}</strong> payment has been directed to Telebirr <strong>${adminPhone}</strong> and an SMS alert was sent to the Admin.`;
+
+            const isCert = stage === 'Certificate';
+            const isApproved = isCert ? !!user.certApproved : !!user.regApproved;
+            const badge = document.getElementById('pending-access-status');
+            const linkArea = document.getElementById('pending-approved-link-area');
+
+            if (isApproved) {
+                badge.className = "badge badge-done";
+                badge.innerText = `Approved by Admin (${stage})`;
+                const link = buildApprovedLink(user, isCert ? 'cert' : 'course');
+                const anchor = document.getElementById('pending-approved-link-anchor');
+                anchor.href = link;
+                anchor.innerText = link;
+                linkArea.classList.remove('hidden');
+            } else {
+                badge.className = "badge badge-pending";
+                badge.innerText = `Pending Admin Approval (${stage})`;
+                linkArea.classList.add('hidden');
+            }
+            showView('pending');
+        }
+
+        function checkApprovalStatus() {
+            const signedAccess = parseAccessFromUrl();
+            if (signedAccess && activateSignedAccess(signedAccess)) return;
+            if (!currentUser) return;
+            routeCurrentUser();
+        }
+
+        function openApprovedDestination() {
+            if (!currentUser) return;
+            if (currentUser.certApproved && currentUser.certPendingApproval) {
+                openCertificateView(currentUser);
+            } else if (currentUser.regApproved) {
+                openCourseView(currentUser);
+            }
+        }
+
+        function copyApprovedLink(customText) {
+            const text = customText || document.getElementById('pending-approved-link-anchor').innerText;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(() => alert("Shareable Admin-Approved Link copied!")).catch(() => alert("Link: " + text));
+            } else {
+                alert("Link: " + text);
+            }
+        }
+
+        function updateUIWithSettings() {
+            const adminPhone = config.adminPhone || "0917106325";
+            const ids = {
+                'display-reg-price-etb': config.regETB,
+                'display-reg-price-usd': Number(config.regUSD).toFixed(2),
+                'display-cert-price-etb': config.certETB,
+                'display-cert-price-usd': Number(config.certUSD).toFixed(2),
+                'pay-reg-price-etb': config.regETB,
+                'pay-reg-price-usd': Number(config.regUSD).toFixed(2),
+                'pay-cert-price-etb': config.certETB,
+                'pay-cert-price-usd': Number(config.certUSD).toFixed(2),
+                'telebirr-target-display': adminPhone,
+                'sms-log-target': adminPhone
+            };
+
+            for (const [id, value] of Object.entries(ids)) {
+                const el = document.getElementById(id);
+                if (el) el.innerText = value;
+            }
+
+            document.getElementById('admin-reg-etb').value = config.regETB;
+            document.getElementById('admin-reg-usd').value = config.regUSD;
+            document.getElementById('admin-cert-etb').value = config.certETB;
+            document.getElementById('admin-cert-usd').value = config.certUSD;
+            document.getElementById('admin-telebirr-phone').value = adminPhone;
+            document.getElementById('admin-cert-logo').value = config.certLogo;
+
+            renderCertificateLogo();
+        }
+
+        function renderCertificateLogo() {
+            const box = document.getElementById('cert-logo-box');
+            const val = (config.certLogo || "ToC LOGO").trim();
+            if (val.startsWith("http://") || val.startsWith("https://") || val.startsWith("data:image/")) {
+                box.innerHTML = `<img src="${val}" alt="Course Logo">`;
+            } else {
+                box.innerHTML = `<span id="cert-logo-text">${val}</span>`;
+            }
+        }
+
+        function dispatchAdminSmsAlert(studentName, studentPhone, stage, amount, method, txRef) {
+            const adminPhone = config.adminPhone || "0917106325";
+            const smsBody = `ToC Admin SMS Alert: ${studentName} (${studentPhone}) paid ${amount} via ${method} to Telebirr ${adminPhone} for ${stage}. Ref: ${txRef || 'N/A'}. Approve in Admin Portal (5402402).`;
+
+            smsAlerts.unshift({
+                to: adminPhone,
+                message: smsBody,
+                time: new Date().toLocaleString()
+            });
+            safeSetItem('toc_sms_alerts', JSON.stringify(smsAlerts));
+
+            alert(
+                `Payment sent to Telebirr ${adminPhone}!\n\nSMS Alert Sent & Logged for Admin (${adminPhone}):\n"${smsBody}"\n\nYour access is now PENDING Admin approval.`
+            );
+        }
+
+        function processPayment(type, method, currency) {
+            if (type === 'Registration') {
+                const name = document.getElementById('reg-name').value.trim();
+                const email = document.getElementById('reg-email').value.trim();
+                const phone = document.getElementById('reg-phone').value.trim();
+                const txRef = document.getElementById('reg-txref').value.trim();
+
+                if (!name || !email || !phone) {
+                    alert("Please fill in your full name, email, and phone number.");
+                    return;
+                }
+
+                const amount = currency === 'ETB' ? `${config.regETB} Birr` : `$${Number(config.regUSD).toFixed(2)} USD`;
+
+                currentUser = {
+                    id: "stu_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6),
+                    name,
+                    email,
+                    phone,
+                    regMethod: method,
+                    regCurrency: currency,
+                    regAmount: amount,
+                    regTxRef: txRef || "N/A",
+                    regApproved: false,
+                    hasCertificate: false,
+                    certPendingApproval: false,
+                    certApproved: false,
+                    completedQuizzes: {},
+                    assignments: {}
+                };
+                users.push(currentUser);
+                saveData();
+
+                dispatchAdminSmsAlert(name, phone, "Registration", amount, method, txRef);
+                showPendingScreen(currentUser, "Registration");
+
+            } else if (type === 'Certificate') {
+                if (!currentUser) return;
+                const txRef = document.getElementById('cert-txref').value.trim();
+                const amount = currency === 'ETB' ? `${config.certETB} Birr` : `$${Number(config.certUSD).toFixed(2)} USD`;
+
+                currentUser.certMethod = method;
+                currentUser.certCurrency = currency;
+                currentUser.certAmount = amount;
+                currentUser.certTxRef = txRef || "N/A";
+                currentUser.certPendingApproval = true;
+                currentUser.certApproved = false;
+                syncUserRecord();
+
+                dispatchAdminSmsAlert(currentUser.name, currentUser.phone, "Certificate", amount, method, txRef);
+                showPendingScreen(currentUser, "Certificate");
+            }
+        }
+
+        function adminApproveStudent(userId, scope) {
+            const user = users.find(u => u.id === userId);
+            if (!user) return;
+
+            if (scope === 'reg') {
+                user.regApproved = true;
+            } else if (scope === 'cert') {
+                user.certApproved = true;
+                user.certPendingApproval = true;
+                user.hasCertificate = true;
+                user.certApprovedDate = new Date().toLocaleDateString();
+            }
+
+            if (currentUser && currentUser.id === user.id) {
+                currentUser = user;
+            }
+            saveData();
+            renderAdminData();
+            const shareLink = buildApprovedLink(user, scope === 'cert' ? 'cert' : 'course');
+            alert(`Approved ${scope === 'cert' ? 'Certificate' : 'Registration'} for ${user.name}!\n\nSend this cross-device link to the student:\n${shareLink}`);
+        }
+
+        function openToolkitGuide(guideKey) {
+            const guide = TOOLKIT_GUIDES[guideKey];
+            if (!guide) return;
+            activeReaderKey = guideKey;
+            document.getElementById('reader-title').innerText = guide.title;
+            document.getElementById('reader-body').innerHTML = guide.html;
+            document.getElementById('resource-reader').classList.remove('hidden');
+            document.getElementById('resource-reader').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function closeResourceReader() {
+            activeReaderKey = null;
+            document.getElementById('resource-reader').classList.add('hidden');
+        }
+
+        function renderModules() {
+            const container = document.getElementById('modules-container');
+            container.innerHTML = '';
+
+            const completedQuizzes = (currentUser && currentUser.completedQuizzes) ? currentUser.completedQuizzes : {};
+            const assignments = (currentUser && currentUser.assignments) ? currentUser.assignments : {};
+
+            MODULES_DATA.forEach(m => {
+                const isDone = !!completedQuizzes[m.id];
+                const savedText = assignments[m.id] || '';
+
+                const lessonsHtml = m.lessons.map(l =>
+                    `<li>📘 <a href="javascript:void(0)" onclick="openToolkitGuide('${l.guideKey}'); return false;">${l.label}</a></li>`
+                ).join('');
+
+                const studyLinksHtml = m.studyLinks.map(s =>
+                    `<li>✨ <a href="javascript:void(0)" onclick="${s.action}; return false;">${s.label}</a></li>`
+                ).join('');
+
+                const resourcesHtml = m.resources.map(r =>
+                    `<li>📖 <a href="javascript:void(0)" onclick="openToolkitGuide('${r.guideKey}'); return false;">${r.label}</a></li>`
+                ).join('');
+
+                const promptLinksHtml = m.promptLinks.map(p =>
+                    `<li>🤖 <a href="javascript:void(0)" onclick="openToolkitGuide('${p.guideKey}'); return false;">${p.label}</a></li>`
+                ).join('');
+
+                const optionsHtml = m.quiz.options.map((opt, idx) => `
+                    <label class="quiz-option">
+                        <input type="radio" name="quiz-${m.id}" value="${idx}" ${isDone && idx === m.quiz.correct ? 'checked' : ''}> ${opt}
+                    </label>
+                `).join('');
+
+                container.innerHTML += `
+                    <div class="module">
+                        <div class="module-header">
+                            <div>
+                                <h3>${m.title}</h3>
+                                <p>${m.desc}</p>
+                            </div>
+                            <span class="badge ${isDone ? 'badge-done' : 'badge-pending'}" id="mod-badge-${m.id}">
+                                ${isDone ? '✓ Completed' : 'In Progress'}
+                            </span>
+                        </div>
+
+                        <div class="content-columns">
+                            <div class="content-box">
+                                <h4>Lessons (Text)</h4>
+                                <ul>${lessonsHtml}</ul>
+                            </div>
+                            <div class="content-box">
+                                <h4>PPT, Handouts, Cards & Maps</h4>
+                                <ul>${studyLinksHtml}</ul>
+                            </div>
+                            <div class="content-box">
+                                <h4>Handbooks & Prompt Library</h4>
+                                <ul>
+                                    ${resourcesHtml}
+                                    ${promptLinksHtml}
+                                </ul>
+                            </div>
+                        </div>
+
+                        <div class="notes-box"><strong>Course Text Notes:</strong> ${m.notes}</div>
+                        <div class="prompt-box">🤖 <strong>Featured AI Prompt:</strong> <em>"${m.prompt}"</em></div>
+
+                        <div class="activity-grid">
+                            <div class="quiz-box">
+                                <h4>📝 Knowledge Check</h4>
+                                <p style="font-size: 0.92rem; font-weight: 600; margin-bottom: 0.4rem;">${m.quiz.question}</p>
+                                ${optionsHtml}
+                                <button class="btn-sm" style="margin-top: 0.5rem;" onclick="checkQuiz(${m.id})">Check Answer</button>
+                                <div class="quiz-feedback" id="quiz-fb-${m.id}" style="color: ${isDone ? 'var(--success)' : 'inherit'};">
+                                    ${isDone ? '✓ ' + m.quiz.explanation : ''}
+                                </div>
+                            </div>
+
+                            <div class="assign-box">
+                                <h4>✍️ Practical Assignment</h4>
+                                <p style="font-size: 0.88rem; color: #555; margin-bottom: 0.4rem;">${m.assignmentPrompt}</p>
+                                <textarea class="ws-input" id="assign-input-${m.id}" placeholder="Write your draft here...">${savedText}</textarea>
+                                <div style="margin-top: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
+                                    <button class="btn-outline" onclick="saveAssignment(${m.id})">Save Draft</button>
+                                    <span id="assign-status-${m.id}" style="font-size: 0.82rem; color: var(--success);">${savedText ? 'Saved ✓' : ''}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        function checkQuiz(modId) {
+            const mod = MODULES_DATA.find(m => m.id === modId);
+            const selected = document.querySelector(`input[name="quiz-${modId}"]:checked`);
+            const fb = document.getElementById(`quiz-fb-${modId}`);
+
+            if (!selected) {
+                fb.style.color = "var(--danger)";
+                fb.innerText = "Please select an option first.";
+                return;
+            }
+
+            if (parseInt(selected.value) === mod.quiz.correct) {
+                fb.style.color = "var(--success)";
+                fb.innerText = "✓ Correct! " + mod.quiz.explanation;
+                document.getElementById(`mod-badge-${modId}`).className = "badge badge-done";
+                document.getElementById(`mod-badge-${modId}`).innerText = "✓ Completed";
+
+                if (currentUser) {
+                    currentUser.completedQuizzes = currentUser.completedQuizzes || {};
+                    currentUser.completedQuizzes[modId] = true;
+                    syncUserRecord();
+                    updateProgressUI();
+                }
+            } else {
+                fb.style.color = "var(--danger)";
+                fb.innerText = "Not quite—review the module rule and try again.";
+            }
+        }
+
+        function saveAssignment(modId) {
+            const text = document.getElementById(`assign-input-${modId}`).value;
+            if (currentUser) {
+                currentUser.assignments = currentUser.assignments || {};
+                currentUser.assignments[modId] = text;
+                syncUserRecord();
+            }
+            const status = document.getElementById(`assign-status-${modId}`);
+            status.innerText = "Saved ✓";
+        }
+
+        function updateProgressUI() {
+            const completedCount = (currentUser && currentUser.completedQuizzes)
+                ? Object.keys(currentUser.completedQuizzes).length
+                : 0;
+            const pct = Math.round((completedCount / MODULES_DATA.length) * 100);
+            document.getElementById('progress-text').innerText = `${completedCount}/${MODULES_DATA.length} Modules (${pct}%)`;
+            document.getElementById('progress-bar').style.width = `${pct}%`;
+        }
+
+        function renderChecklist() {
+            const tbody = document.getElementById('checklist-tbody');
+            tbody.innerHTML = '';
+            CHECKLIST_ITEMS.forEach((item, idx) => {
+                tbody.innerHTML += `
+                    <tr>
+                        <td><strong>${item.area}</strong></td>
+                        <td>${item.text}</td>
+                        <td>
+                            <select class="checklist-select" id="chk-${idx}" onchange="calculateChecklistScore()" style="width:100%; padding:0.4rem; border-radius:4px; border:1px solid #ccc;">
+                                <option value="0">0 — Not met</option>
+                                <option value="1">1 — Partly met</option>
+                                <option value="2">2 — Fully met</option>
+                            </select>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+
+        function calculateChecklistScore() {
+            let total = 0;
+            const scores = [];
+            CHECKLIST_ITEMS.forEach((_, idx) => {
+                const val = parseInt(document.getElementById(`chk-${idx}`).value) || 0;
+                total += val;
+                scores.push(val);
+            });
+            const pct = Math.round((total / 34) * 100);
+            let label = "Below 70% — Revise logic first";
+            let color = "var(--danger)";
+            if (pct >= 85) { label = "Strong (85%+ Ready!)"; color = "var(--success)"; }
+            else if (pct >= 70) { label = "70–84% — Needs polish"; color = "var(--warning)"; }
+
+            const badge = document.getElementById('checklist-score-badge');
+            badge.style.color = color;
+            badge.innerText = `Score: ${total} / 34 (${pct}%) — ${label}`;
+
+            safeSetItem('toc_checklist_scores', JSON.stringify(scores));
+        }
+
+        function saveWorksheets() {
+            const data = {};
+            document.querySelectorAll('.ws-field').forEach(el => {
+                data[el.id] = el.value;
+            });
+            safeSetItem('toc_worksheets', JSON.stringify(data));
+            alert("All toolkit worksheets saved in your browser!");
+        }
+
+        function loadWorksheets() {
+            const data = JSON.parse(safeGetItem('toc_worksheets')) || {};
+            Object.entries(data).forEach(([id, val]) => {
+                const el = document.getElementById(id);
+                if (el) el.value = val;
+            });
+            const scores = JSON.parse(safeGetItem('toc_checklist_scores')) || [];
+            scores.forEach((val, idx) => {
+                const el = document.getElementById(`chk-${idx}`);
+                if (el) el.value = val;
+            });
+            if (scores.length) calculateChecklistScore();
+        }
+
+        function switchDashTab(tab) {
+            const tabs = ['modules', 'ppt', 'handouts', 'flashcards', 'mindmaps', 'text', 'downloads', 'worksheets'];
+            tabs.forEach(t => {
+                const panel = document.getElementById('dash-tab-' + t);
+                const btn = document.getElementById('tab-btn-' + t);
+                if (panel) panel.classList.toggle('hidden', t !== tab);
+                if (btn) btn.classList.toggle('active', t === tab);
+            });
+            if (tab === 'ppt') renderPptSlide();
+            if (tab === 'handouts') renderHandoutsTab();
+            if (tab === 'flashcards') renderFlashcards();
+            if (tab === 'mindmaps') renderMindMapsTab();
+            if (tab === 'text') renderFullCourseTextTab();
+        }
+
+        function showView(viewId) {
+            const views = ['landing', 'register', 'pending', 'course', 'certificate-prompt', 'certificate', 'admin'];
+            views.forEach(v => document.getElementById('view-' + v).classList.add('hidden'));
+            document.getElementById('view-' + viewId).classList.remove('hidden');
+        }
+
+        function syncUserRecord() {
+            if (!currentUser) return;
+            const idx = users.findIndex(u => u.id === currentUser.id);
+            if (idx !== -1) users[idx] = currentUser;
+            saveData();
+        }
+
+        function saveData() {
+            safeSetItem('toc_config', JSON.stringify(config));
+            safeSetItem('toc_users', JSON.stringify(users));
+            safeSetItem('toc_currentUser', JSON.stringify(currentUser));
+        }
+
+        function showAdminLogin() {
+            if (isAdmin) {
+                showView('admin');
+                renderAdminData();
+                return;
+            }
+            const code = prompt("Enter Admin Code:");
+            if (code === ADMIN_CODE) {
+                isAdmin = true;
+                showView('admin');
+                renderAdminData();
+            } else if (code !== null) {
+                alert("Access Denied: Invalid Admin Code.");
+            }
+        }
+
+        function renderAdminData() {
+            const totalCount = users.length;
+            const approvedRegUsers = users.filter(u => u.regApproved);
+            const approvedCertUsers = users.filter(u => u.certApproved);
+
+            let revETB = 0;
+            let revUSD = 0;
+
+            approvedRegUsers.forEach(u => {
+                if (u.regCurrency === 'USD') revUSD += Number(config.regUSD);
+                else revETB += Number(config.regETB);
+            });
+
+            approvedCertUsers.forEach(u => {
+                if (u.certCurrency === 'USD') revUSD += Number(config.certUSD);
+                else revETB += Number(config.certETB);
+            });
+
+            document.getElementById('total-regs').innerText = totalCount;
+            document.getElementById('approved-regs').innerText = approvedRegUsers.length;
+            document.getElementById('total-certs').innerText = approvedCertUsers.length;
+            document.getElementById('total-rev-etb').innerText = revETB.toLocaleString();
+            document.getElementById('total-rev-usd').innerText = revUSD.toFixed(2);
+
+            const tbody = document.getElementById('admin-student-list');
+            tbody.innerHTML = '';
+
+            users.forEach(u => {
+                const regStatusHtml = u.regApproved
+                    ? `<span class="badge badge-done">✓ Approved</span>`
+                    : `<button class="btn-approve" onclick="adminApproveStudent('${u.id}', 'reg')">Approve Course</button>`;
+
+                let certStatusHtml = `<span style="color:#777;">Not requested</span>`;
+                if (u.certApproved) {
+                    certStatusHtml = `<span class="badge badge-done">✓ Approved</span>`;
+                } else if (u.certPendingApproval) {
+                    certStatusHtml = `<button class="btn-approve" onclick="adminApproveStudent('${u.id}', 'cert')">Approve Cert</button>`;
+                }
+
+                const isCertActive = u.certApproved && u.certPendingApproval;
+                const activeScope = isCertActive ? 'cert' : 'course';
+                const generatedLink = (isCertActive || u.regApproved) ? buildApprovedLink(u, activeScope) : '';
+                const activeLinkHtml = generatedLink
+                    ? `<a href="${generatedLink}" style="color:var(--primary); text-decoration:underline;">Open Approved Link</a><br><button class="btn-outline" style="margin-top:0.35rem; font-size:0.78rem; padding:0.25rem 0.55rem;" onclick="copyApprovedLink(${JSON.stringify(generatedLink)})">Copy Shareable Link</button>`
+                    : 'Awaiting approval';
+
+                tbody.innerHTML += `
+                    <tr>
+                        <td><strong>${u.name}</strong><br><span style="color:#666;">${u.phone} | ${u.email}</span></td>
+                        <td>Reg: ${u.regMethod} (${u.regAmount})<br><span style="color:#666;">Ref: ${u.regTxRef || 'N/A'}</span>${u.certPendingApproval ? `<br>Cert: ${u.certMethod} (${u.certAmount})` : ''}</td>
+                        <td>${regStatusHtml}</td>
+                        <td>${certStatusHtml}</td>
+                        <td style="word-break:break-all; max-width:250px;">${activeLinkHtml}</td>
+                    </tr>
+                `;
+            });
+
+            const smsContainer = document.getElementById('admin-sms-list');
+            if (!smsAlerts.length) {
+                smsContainer.innerHTML = `<p style="color:#666; margin-top:0.4rem;">No payment SMS alerts recorded yet.</p>`;
+            } else {
+                smsContainer.innerHTML = smsAlerts.map(s => `
+                    <div class="sms-item">
+                        <strong>To ${s.to}</strong> <span style="color:#777;">(${s.time})</span><br>
+                        <span>${s.message}</span>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function updateAdminSettings() {
+            config.regETB = parseFloat(document.getElementById('admin-reg-etb').value) || 0;
+            config.regUSD = parseFloat(document.getElementById('admin-reg-usd').value) || 0;
+            config.certETB = parseFloat(document.getElementById('admin-cert-etb').value) || 0;
+            config.certUSD = parseFloat(document.getElementById('admin-cert-usd').value) || 0;
+            config.adminPhone = document.getElementById('admin-telebirr-phone').value.trim() || "0917106325";
+            config.certLogo = document.getElementById('admin-cert-logo').value.trim() || "ToC LOGO";
+
+            saveData();
+            updateUIWithSettings();
+            alert("Settings updated!");
+            renderAdminData();
+        }
+
+        function logout() {
+            isAdmin = false;
+            currentUser = null;
+            safeRemoveItem('toc_currentUser');
+            showView('landing');
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
